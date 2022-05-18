@@ -1,7 +1,9 @@
+mod database;
 mod resp;
 
 use std::{
     collections::HashMap,
+    ops::Deref,
     sync::{Arc, Mutex},
 };
 
@@ -10,11 +12,12 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     stream::StreamExt,
+    sync::oneshot,
+    time::{delay_for, Duration},
 };
 
+use database::{Db, DbEntry};
 use resp::{RespError, RespValue};
-
-type Db = Arc<Mutex<HashMap<String, String>>>;
 
 #[tokio::main]
 async fn main() {
@@ -64,25 +67,16 @@ async fn handle_command(val: RespValue, stream: &mut TcpStream, db: &Db) {
         let mut response = match command.as_str() {
             "PING" => RespValue::new_simple("PONG"),
             "ECHO" => data.pop().unwrap(),
-            "SET" => {
-                let key = data.pop().unwrap().inner_string();
-                let value = data.pop().unwrap().inner_string();
-
-                {
-                    db.lock().unwrap().insert(key, value);
-                }
-
-                RespValue::new_simple("OK")
-            }
+            "SET" => handle_set_command(data, db),
             "GET" => {
                 let key = data.pop().unwrap().inner_string();
                 if let Some(value) = db.lock().unwrap().get(&key) {
-                    RespValue::new_simple(value)
+                    RespValue::new_simple(value.deref())
                 } else {
                     RespValue::Null
                 }
             }
-            x => todo!("{}", x),
+            x => unimplemented!("{}", x),
         }
         .raw_bytes();
 
@@ -92,4 +86,51 @@ async fn handle_command(val: RespValue, stream: &mut TcpStream, db: &Db) {
     } else {
         panic!("Sometgin went wrong");
     }
+}
+
+fn handle_set_command(mut args: Vec<RespValue>, db: &Db) -> RespValue {
+    let key = args.pop().unwrap().inner_string();
+    let value = args.pop().unwrap().inner_string();
+
+    let cancel_timeout = |previous: Option<DbEntry>| {
+        if let Some(entry) = previous {
+            if let Some(tx) = entry.timeout_channel {
+                let _ = tx.send(());
+            }
+        }
+    };
+
+    if let Some(arg) = args.pop() {
+        let mut arg = arg.inner_string();
+        arg.make_ascii_uppercase();
+        match arg.as_str() {
+            "PX" => {
+                let (tx, mut rx) = oneshot::channel();
+                let expire = args.pop().unwrap().inner_string().parse().unwrap();
+                let db_timeout = db.clone();
+
+                let previous = {
+                    db.lock()
+                        .unwrap()
+                        .insert(key.clone(), DbEntry::with_timeout(value, tx))
+                };
+
+                cancel_timeout(previous);
+
+                tokio::spawn(async move {
+                    delay_for(Duration::from_millis(expire)).await;
+                    if rx.try_recv().is_ok() {
+                        return;
+                    }
+                    db_timeout.lock().unwrap().remove(&key);
+                });
+            }
+            x => unimplemented!("{}", x),
+        }
+    } else {
+        let previous = db.lock().unwrap().insert(key, DbEntry::new(value));
+        cancel_timeout(previous);
+    }
+
+    RespValue::new_simple("OK")
 }
