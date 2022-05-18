@@ -129,6 +129,20 @@ impl RespValue {
         }
     }
 
+    pub fn inner_string(self) -> String {
+        match self {
+            Self::Simple(v) | Self::Error(v) | Self::Bulk(v) => v,
+            _ => panic!("Wrong kind! (was: '{}')", self.kind()),
+        }
+    }
+
+    pub fn inner_int(self) -> u64 {
+        match self {
+            Self::Integer(v) => v,
+            _ => panic!("Wrong kind! (was: '{}')", self.kind()),
+        }
+    }
+
     pub fn raw_bytes(&self) -> Bytes {
         let mut buf = match self {
             Self::Simple(s) => {
