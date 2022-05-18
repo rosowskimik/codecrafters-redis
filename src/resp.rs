@@ -13,11 +13,17 @@ pub enum RespValue {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum RespError {
     Incomplete,
+    WrongKind {
+        expected: &'static str,
+        got: &'static str,
+    },
     Other,
 }
 
+#[allow(dead_code)]
 impl RespValue {
     pub fn try_from_bytes(bytes: &mut BytesMut) -> Result<Self, RespError> {
         if !bytes.has_remaining() {
@@ -85,6 +91,44 @@ impl RespValue {
         }
     }
 
+    pub fn new_simple(value: impl ToString) -> Self {
+        Self::Simple(value.to_string())
+    }
+
+    pub fn new_error(value: impl ToString) -> Self {
+        Self::Error(value.to_string())
+    }
+
+    pub fn new_integer(value: impl Into<u64>) -> Self {
+        Self::Integer(value.into())
+    }
+
+    pub fn new_bulk(value: impl ToString) -> Self {
+        Self::Bulk(value.to_string())
+    }
+
+    pub fn new_array() -> Self {
+        Self::Array(Vec::new())
+    }
+
+    pub fn array_with<T>(value: Vec<T>) -> Self
+    where
+        RespValue: From<T>,
+    {
+        Self::Array(value.into_iter().map(RespValue::from).collect())
+    }
+
+    pub const fn kind(&self) -> &'static str {
+        match *self {
+            Self::Simple(_) => "simple string",
+            Self::Error(_) => "error",
+            Self::Integer(_) => "integer",
+            Self::Bulk(_) => "bulk string",
+            Self::Null => "null",
+            Self::Array(_) => "array",
+        }
+    }
+
     pub fn raw_bytes(&self) -> Bytes {
         let mut buf = match self {
             Self::Simple(s) => {
@@ -114,10 +158,11 @@ impl RespValue {
                 let len = val.len();
                 let len_bytes = len.to_string();
                 let len_bytes = len_bytes.as_bytes();
-                let mut buf = BytesMut::with_capacity(len + len_bytes.len() + 3);
+                let mut buf = BytesMut::with_capacity(len + len_bytes.len() + 5);
 
                 buf.put_u8(b'$');
                 buf.put(len_bytes);
+                buf.put_slice(b"\r\n");
                 buf.put(val);
                 buf
             }
@@ -132,8 +177,10 @@ impl RespValue {
                         acc
                     },
                 );
-                let mut buf = BytesMut::with_capacity(val.len() + len_bytes.len() + 3);
+                let mut buf = BytesMut::with_capacity(len_bytes.len() + val.len() + 5);
                 buf.put_u8(b'*');
+                buf.put(len_bytes);
+                buf.put_slice(b"\r\n");
                 buf.put_slice(&val);
                 buf
             }
@@ -148,13 +195,20 @@ impl RespValue {
         buf.freeze()
     }
 
+    // pub fn try_into_command(self) -> Result<String, Error> {
+
+    // }
+
     pub fn array_push(&mut self, val: RespValue) -> Result<(), RespError> {
         assert!(matches!(*self, Self::Array(_)));
         if let Self::Array(v) = self {
             v.push(val);
             Ok(())
         } else {
-            Err(RespError::Other)
+            Err(RespError::WrongKind {
+                expected: Self::new_array().kind(),
+                got: self.kind(),
+            })
         }
     }
 }
@@ -187,8 +241,11 @@ impl std::error::Error for RespError {}
 
 impl Display for RespError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match *self {
+        match self {
             Self::Incomplete => "Stream ended early".fmt(f),
+            Self::WrongKind { expected, got } => {
+                write!(f, "Wrong Kind (expected '{}' got '{}')", expected, got)
+            }
             Self::Other => "Something went wrong".fmt(f),
         }
     }

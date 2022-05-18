@@ -41,13 +41,26 @@ async fn handle_connection(mut stream: TcpStream) {
 }
 
 async fn handle_command(val: RespValue, stream: &mut TcpStream) {
-    if let RespValue::Array(val) = val {
-        let (command, _data) = val.split_at(1);
-        let _command = &command[0];
-        // match command[0] {
+    if let RespValue::Array(mut val) = val {
+        val.reverse();
+        let command = match val.pop().unwrap() {
+            RespValue::Bulk(mut cmd) => {
+                cmd.make_ascii_uppercase();
+                cmd
+            }
+            _ => unreachable!(),
+        };
 
-        // }
-        let mut response = RespValue::Simple("PONG".to_string()).raw_bytes();
+        let mut response = match command.as_str() {
+            "PING" => RespValue::new_simple("PONG"),
+            "ECHO" => val.pop().unwrap(),
+            x => todo!("{}", x),
+        }
+        .raw_bytes();
+
+        dbg!(&response);
+
+        // let mut response = RespValue::new_simple("PONG").raw_bytes();
         while response.has_remaining() {
             stream.write_buf(&mut response).await.unwrap();
         }
